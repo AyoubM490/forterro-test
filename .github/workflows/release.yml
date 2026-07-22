@@ -96,13 +96,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Voir ci.yml : une reference OCI doit etre en minuscules, et
+      # github.repository_owner conserve la casse du compte. Ici aucune action ne
+      # normalise a notre place — les references sont construites a la main.
+      - name: Normaliser le proprietaire en minuscules
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       # On ne reconstruit PAS les images : on retague celles deja testees par la CI.
       # Reconstruire, c'est livrer un artefact que personne n'a valide.
       - name: Retaguer les images validees
         run: |
           for service in bff intelligence-api invoicing-api openbanking-api payments-worker; do
-            src="ghcr.io/${{ github.repository_owner }}/${service}:sha-${{ github.sha }}"
-            dst="ghcr.io/${{ github.repository_owner }}/${service}:${{ steps.version.outputs.value }}"
+            src="ghcr.io/${{ steps.owner.outputs.value }}/${service}:sha-${{ github.sha }}"
+            dst="ghcr.io/${{ steps.owner.outputs.value }}/${service}:${{ steps.version.outputs.value }}"
             docker buildx imagetools create --tag "$dst" "$src"
           done
 
@@ -121,8 +128,8 @@ jobs:
           build() {
             docker build -f deploy/migrations/Dockerfile \
               --build-arg PROJECT_PATH="$2" \
-              -t "ghcr.io/${{ github.repository_owner }}/$1:${{ steps.version.outputs.value }}" .
-            docker push "ghcr.io/${{ github.repository_owner }}/$1:${{ steps.version.outputs.value }}"
+              -t "ghcr.io/${{ steps.owner.outputs.value }}/$1:${{ steps.version.outputs.value }}" .
+            docker push "ghcr.io/${{ steps.owner.outputs.value }}/$1:${{ steps.version.outputs.value }}"
           }
           build invoicing-migrations src/Services/Invoicing/Forterro.Invoicing.Api
           build payments-migrations  src/Services/Payments/Forterro.Payments.Worker
