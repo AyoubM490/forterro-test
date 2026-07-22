@@ -1,0 +1,84 @@
+# Porte d'entree nord-sud du cluster.
+#
+# Repartition des roles, volontairement nette :
+#   - l'Ingress fait le TRANSPORT — TLS, routage par hote, protections de bordure ;
+#   - le BFF fait l'APPLICATIF — sessions, agregation, propagation des jetons.
+#
+# Un seul hote et une seule regle : tout entre par le BFF. Exposer en plus les services
+# metier ici reviendrait a ouvrir une seconde porte qui ne passe par aucune de ses regles.
+#
+# Prerequis dans le cluster (installes hors de ce depot, ce sont des composants
+# d'infrastructure partages) :
+#   helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace
+#   helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: platform@forterro.example
+    privateKeySecretRef:
+      name: letsencrypt-production-account-key
+    solvers:
+      # Challenge HTTP-01 : cert-manager cree un Ingress temporaire pour repondre a
+      # /.well-known/acme-challenge/. Suffisant ici ; un certificat joker exigerait
+      # DNS-01, donc des identifiants du fournisseur DNS.
+      - http01:
+          ingress:
+            ingressClassName: nginx
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: business-services
+  annotations:
+    # Declenche l'emission ET le renouvellement automatique par cert-manager.
+    # Le certificat est renouvele a 2/3 de sa duree de vie, sans intervention :
+    # c'est tout l'interet, un certificat expire un samedi soir coute une astreinte.
+    cert-manager.io/cluster-issuer: letsencrypt-production
+
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # HSTS : le navigateur refusera de repasser en http pendant un an. A n'activer
+    # qu'une fois le https confirme sur TOUT le domaine — la directive est difficile
+    # a revoquer, les navigateurs la gardent en cache.
+    nginx.ingress.kubernetes.io/hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+
+    # Premiere barriere de debit, par IP source. Elle ne remplace pas celle du BFF :
+    # celle-ci ignore qui est l'appelant, celle du BFF connait son client_id. Une IP
+    # partagee par toute une entreprise ne doit pas etre limitee comme un seul client.
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "3"
+
+    # Un corps de requete de 2 Mo suffit largement pour du JSON de facturation.
+    # Sans plafond, un POST de 2 Go occupe un worker NGINX pour rien.
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+
+    # L'en-tete Server d'NGINX n'apprend rien a un utilisateur legitime.
+    nginx.ingress.kubernetes.io/server-snippet: |
+      more_clear_headers "Server";
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.forterro.example
+      # cert-manager cree et remplit ce Secret. Il n'est pas dans Git,
+      # et il ne doit pas y etre : il contient une cle privee.
+      secretName: business-services-tls
+  rules:
+    - host: api.forterro.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bff
+                port:
+                  name: http

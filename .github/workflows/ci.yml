@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Une PR qui recoit un nouveau commit annule le run precedent :
+# inutile de payer 10 minutes de CI pour un code deja remplace.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build et tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer le SDK .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          # La cle est derivee des fichiers de versions : le cache est invalide
+          # exactement quand une dependance change, jamais avant.
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restaurer
+        run: dotnet restore
+
+      # --warnaserror double la barriere : meme si quelqu'un desactive
+      # TreatWarningsAsErrors localement, la CI refuse le merge.
+      - name: Compiler
+        run: dotnet build --no-restore --configuration Release --warnaserror
+
+      - name: Verifier le formatage
+        run: dotnet format --verify-no-changes --no-restore
+
+      # Docker est disponible nativement sur les runners ubuntu :
+      # les tests Testcontainers demarrent un vrai PostgreSQL.
+      - name: Tests
+        run: >
+          dotnet test --no-build --configuration Release
+          --logger "trx;LogFileName=results.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      - name: Publier les resultats de tests
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: ./TestResults
+
+  security:
+    name: Analyse de securite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Echoue si une dependance directe OU transitive porte une CVE connue.
+      # C'est cette regle qui a impose la montee d'OpenTelemetry (GHSA-4625-4j76-fww9).
+      - name: Dependances vulnerables
+        run: |
+          dotnet restore
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee audit.log
+          if grep -q "has the following vulnerable packages" audit.log; then
+            echo "::error::Des dependances vulnerables ont ete detectees."
+            exit 1
+          fi
+
+      - name: Dependances obsoletes (informatif)
+        continue-on-error: true
+        run: dotnet list package --deprecated
+
+      - name: Analyse statique CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+
+      - name: Compiler pour CodeQL
+        run: dotnet build --configuration Release
+
+      - name: Resultats CodeQL
+        uses: github/codeql-action/analyze@v3
+
+  docker:
+    name: Images conteneur
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: bff
+            dockerfile: src/Gateway/Forterro.Bff/Dockerfile
+          - service: invoicing-api
+            dockerfile: src/Services/Invoicing/Forterro.Invoicing.Api/Dockerfile
+          - service: openbanking-api
+            dockerfile: src/Services/OpenBanking/Forterro.OpenBanking.Api/Dockerfile
+          - service: payments-worker
+            dockerfile: src/Services/Payments/Forterro.Payments.Worker/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Authentification au registre
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadonnees d'image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Construire et pousser
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          # Sur une PR on construit sans pousser : on valide le Dockerfile
+          # sans polluer le registre.
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan de vulnerabilites de l'image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:sha-${{ github.sha }}
+          format: table
+          # Seules HIGH et CRITICAL bloquent : sinon la CI est rouge en permanence
+          # a cause de CVE mineures de l'image de base, et plus personne ne la regarde.
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+        if: github.event_name == 'push'

@@ -1,0 +1,127 @@
+# Migration du schema, executee AVANT le deploiement des pods applicatifs.
+#
+# UN JOB PAR SERVICE A ETAT. Les deux bases sont independantes (ADR 0003), leurs
+# migrations le sont aussi : rien ne justifie de les serialiser, et une base ne doit
+# pas rester non migree parce que l'autre a echoue.
+#
+# Pourquoi un Job dedie plutot que Database.Migrate() au demarrage :
+#   - avec N replicas, N pods tenteraient de migrer simultanement ;
+#   - un rollout echoue apres que le schema a deja ete modifie, sans trace claire ;
+#   - impossible de valider la migration avant de basculer le trafic.
+#
+# Le hook PreSync d'ArgoCD garantit l'ordre : le job doit reussir, sinon
+# la synchronisation s'arrete et l'ancienne version continue de tourner.
+#
+# Les images sont produites par deploy/migrations/Dockerfile
+# (`dotnet ef migrations bundle`) et publiees par le workflow de release.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: invoicing-migration
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  # Nettoyage automatique 24 h apres : on garde le job assez longtemps
+  # pour lire ses logs en cas d'incident.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: invoicing-migration
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/forterro/invoicing-migrations:latest
+          args: ["--connection", "$(CONNECTION_STRING)"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: invoicing-secrets
+                  key: connection-string
+          # Un executable mono-fichier extrait ses bibliotheques natives au demarrage.
+          # Avec un systeme de fichiers racine en lecture seule, il lui faut un
+          # emplacement inscriptible, sinon il s'arrete sur « Failure processing
+          # application bundle » — a l'execution seulement, jamais au build.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Ce Job N'EXISTAIT PAS : la base payments n'etait migree nulle part.
+#
+# Payments.Worker ne migre qu'en environnement Development (Program.cs), comme
+# Invoicing — c'est le bon choix. Mais son Job manquait. En production le worker
+# demarrait, puis echouait a CHAQUE cycle d'outbox sur
+#   relation "payments.outbox_messages" does not exist
+# sans que le pod ne quitte l'etat Running : l'erreur est journalisee, pas fatale.
+# Kubernetes ne voyait donc rien, et aucune sonde ne se declenchait.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: payments-migration
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payments-migration
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/forterro/payments-migrations:latest
+          args: ["--connection", "$(CONNECTION_STRING)"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: payments-secrets
+                  key: connection-string
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

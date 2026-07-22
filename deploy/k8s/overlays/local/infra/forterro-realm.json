@@ -1,0 +1,433 @@
+{
+  "realm": "forterro",
+  "displayName": "Forterro Business Services",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "clientScopes": [
+    {
+      "name": "profile",
+      "description": "Scope OpenID Connect standard : profil de l'utilisateur.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Consulter votre profil"
+      },
+      "protocolMappers": [
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "full name",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-full-name-mapper",
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "given name",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "firstName",
+            "claim.name": "given_name",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "family name",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "lastName",
+            "claim.name": "family_name",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "email",
+      "description": "Scope OpenID Connect standard : adresse de courriel.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Consulter votre adresse de courriel"
+      },
+      "protocolMappers": [
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "email",
+            "claim.name": "email",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "email verified",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "config": {
+            "user.attribute": "emailVerified",
+            "claim.name": "email_verified",
+            "jsonType.label": "boolean",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "roles",
+      "description": "Roles de realm, sous realm_access.roles. C'est cette structure que KeycloakClaimsFlattener aplatit en claims ASP.NET Core.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "user.model.realmRoleMapping.rolePrefix": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "basic",
+      "description": "Claims minimales attendues dans tout access token (sub, auth_time).",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "auth_time",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
+          "config": {
+            "user.session.note": "AUTH_TIME",
+            "claim.name": "auth_time",
+            "jsonType.label": "long",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "web-origins",
+      "description": "Origines autorisees, injectees dans le token pour les verifications CORS de Keycloak.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "allowed web origins",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-allowed-origins-mapper",
+          "config": {}
+        }
+      ]
+    },
+    {
+      "name": "forterro-audience",
+      "description": "Injecte l'audience des Business Services dans l'access token. Sans elle, chaque API rejetterait le token (aud invalide).",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "business-services-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "forterro-business-services",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "invoicing:read",
+      "description": "Lecture des factures",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Consulter vos factures"
+      }
+    },
+    {
+      "name": "invoicing:write",
+      "description": "Creation, emission et annulation de factures",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Creer et emettre des factures en votre nom"
+      }
+    },
+    {
+      "name": "payments:read",
+      "description": "Consultation des paiements",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      }
+    },
+    {
+      "name": "payments:write",
+      "description": "Initiation de virements",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      }
+    },
+    {
+      "name": "accounts:read",
+      "description": "Consultation des soldes de compte",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      }
+    },
+    {
+      "name": "documents:extract",
+      "description": "Soumission de documents a l'extraction",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Soumettre vos documents a l'extraction automatique"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "forterro-business-services",
+      "name": "Business Services API (resource server)",
+      "description": "Represente les APIs elles-memes. Aucun flow actif : ce client n'existe que pour porter l'audience.",
+      "enabled": true,
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "payments-worker",
+      "name": "Payments Worker (service a service)",
+      "description": "Client confidentiel utilise par la saga de paiement. Flow Client Credentials uniquement : aucun utilisateur n'est implique.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "payments-worker-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "forterro-audience",
+        "payments:read",
+        "payments:write",
+        "accounts:read"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "erp-product-line",
+      "name": "Ligne produit ERP (consommateur des services mutualises)",
+      "description": "Autre ligne produit consommant la facturation. Scopes invoicing acquis ; payments:read optionnel, a demander explicitement. Ne peut jamais initier de virement.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "erp-product-line-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "forterro-audience",
+        "invoicing:read",
+        "invoicing:write"
+      ],
+      "optionalClientScopes": [
+        "payments:read",
+        "documents:extract"
+      ]
+    },
+    {
+      "clientId": "forterro-bff",
+      "name": "BFF (porte d'entree des ecrans)",
+      "description": "Client confidentiel du Backend For Frontend. Authorization Code + PKCE : c'est le BFF, pas le navigateur, qui echange le code contre les jetons et les conserve cote serveur.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "forterro-bff-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:5000/bff/callback",
+        "http://localhost:5000/bff/signout-callback"
+      ],
+      "webOrigins": [
+        "http://localhost:5000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5000/*",
+        "backchannel.logout.session.required": "true"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "web-origins",
+        "forterro-audience",
+        "profile",
+        "email",
+        "invoicing:read",
+        "invoicing:write",
+        "payments:read",
+        "documents:extract"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "forterro-swagger",
+      "name": "Swagger UI",
+      "description": "Client public pour la documentation interactive. PKCE S256 obligatoire : un client public ne peut pas garder de secret.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:5001/*",
+        "http://localhost:5002/*",
+        "http://localhost:8080/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5001",
+        "http://localhost:5002"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "web-origins",
+        "forterro-audience",
+        "profile",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "invoicing:read",
+        "invoicing:write",
+        "payments:read",
+        "payments:write",
+        "accounts:read"
+      ]
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "billing-admin",
+        "description": "Gere le cycle de vie complet des factures"
+      },
+      {
+        "name": "billing-viewer",
+        "description": "Consultation seule"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "demo",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "demo@forterro.example",
+      "firstName": "Utilisateur",
+      "lastName": "Demo",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "billing-admin"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,139 @@
+# Elasticsearch + Kibana — noeud unique, profil memoire reduit.
+#
+# Dimensionnement assume : Elasticsearch est concu pour un cluster de plusieurs noeuds
+# avec 4 a 32 Go de heap. Ici c'est 768 Mo sur un noeud unique, sans replica. Ca tient
+# pour les logs de quatre services sur un poste ; ca ne represente en RIEN une
+# configuration de production.
+#
+# Prerequis de l'hote : vm.max_map_count >= 262144. Elasticsearch utilise mmap pour
+# lire ses index, et sort au demarrage avec « max virtual memory areas too low » si la
+# limite est trop basse. Sous Docker Desktop / WSL2 la valeur par defaut convient deja.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch
+    spec:
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          ports:
+            - name: http
+              containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            # Securite desactivee : un cluster local jetable, sans donnee reelle et
+            # sans exposition hors du poste. En production c'est exactement l'inverse
+            # qu'il faut faire — TLS, authentification, et roles par index.
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.license.self_generated.type
+              value: basic
+            # Xms == Xmx : la JVM ne redimensionne pas son heap a chaud, et laisser
+            # les deux differents provoque des pauses GC au moment ou le tas grandit.
+            - name: ES_JAVA_OPTS
+              value: "-Xms768m -Xmx768m"
+            - name: bootstrap.memory_lock
+              value: "false"
+            - name: cluster.routing.allocation.disk.threshold_enabled
+              value: "false"
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?wait_for_status=yellow&timeout=1s
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              # Au-dessus du heap : la JVM a besoin de memoire hors-tas (buffers mmap,
+              # metaspace, threads). Un limit egal au heap fait tuer le pod en OOMKilled
+              # sans que la JVM n'ait rien a se reprocher.
+              memory: 1500Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+spec:
+  selector:
+    app.kubernetes.io/name: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kibana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.15.3
+          ports:
+            - name: http
+              containerPort: 5601
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: http://elasticsearch.infra.svc.cluster.local:9200
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=512"
+            # Cle de chiffrement des objets sauvegardes. Sans valeur fixe, Kibana en
+            # genere une au demarrage et perd ses data views a chaque redemarrage.
+            - name: XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY
+              value: "forterro-local-kibana-encryption-key-0000000"
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 40
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 1200Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+spec:
+  selector:
+    app.kubernetes.io/name: kibana
+  ports:
+    - name: http
+      port: 5601
+      targetPort: http

@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: business-services
+
+resources:
+  - ../../base
+
+patches:
+  # La facturation encaisse le pic de fin de mois : plancher plus haut en production.
+  - target:
+      kind: Deployment
+      name: invoicing-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: invoicing-api
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 20
+
+configMapGenerator:
+  - name: business-services-config
+    behavior: merge
+    literals:
+      - kafka-bootstrap-servers=b-1.forterro-msk.eu-west-3.amazonaws.com:9096
+      - otlp-endpoint=http://otel-collector.observability.svc.cluster.local:4317
+
+# Les tags d'images sont reecrits par la CI a chaque release :
+# c'est le commit de ce fichier qui declenche le deploiement ArgoCD.
+images:
+  - name: ghcr.io/forterro/bff
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/invoicing-api
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/openbanking-api
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/payments-worker
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/intelligence-api
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/invoicing-migrations
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/payments-migrations
+    newTag: 1.0.0

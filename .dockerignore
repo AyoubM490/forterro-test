@@ -1,0 +1,31 @@
+# Sans ce fichier, le contexte de build depasse 500 Mo et il est transfere
+# une fois par service. Pire : les obj/ de la machine hote contiennent des
+# project.assets.json avec des chemins Windows (C:\Users\...\.nuget\packages),
+# qui n'ont aucun sens dans le conteneur Linux et cassent le build.
+
+**/bin/
+**/obj/
+**/artifacts/
+**/TestResults/
+**/coverage/
+
+.git/
+.github/
+.vs/
+.vscode/
+.idea/
+
+# Les tests ne sont pas necessaires pour publier une image applicative.
+tests/
+
+# Le deploiement n'entre pas dans l'image.
+deploy/
+docs/
+
+**/*.user
+**/*.suo
+**/.env
+**/appsettings.Local.json
+**/Dockerfile
+**/.dockerignore
+README.md

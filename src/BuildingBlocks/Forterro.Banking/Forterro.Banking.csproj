@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Forterro.Banking</PackageId>
+    <Version>1.0.0</Version>
+    <Description>Validation IBAN (mod-97, ISO 13616) pour les Business Services Forterro. Sans dependance.</Description>
+    <PackageTags>forterro;iban;banking;validation</PackageTags>
+  </PropertyGroup>
+
+</Project>

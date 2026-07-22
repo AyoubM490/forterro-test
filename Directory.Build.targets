@@ -1,0 +1,17 @@
+<Project>
+
+  <!--
+    .targets et non .props : ce fichier est importe APRES le fichier projet, donc
+    $(IsPackable) y porte la valeur que le projet a fixee. Dans Directory.Build.props,
+    importe AVANT, la condition serait evaluee sur le defaut et n'inclurait jamais rien.
+    C'est le piege classique de MSBuild sur ces deux fichiers.
+
+    Le README est embarque dans le paquet : un composant interne sans page d'accueil
+    est un composant que personne n'adopte, et la description NuGet ne tient qu'une
+    phrase.
+  -->
+  <ItemGroup Condition="'$(IsPackable)' == 'true' AND Exists('$(MSBuildProjectDirectory)\README.md')">
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

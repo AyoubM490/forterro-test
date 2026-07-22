@@ -1,0 +1,74 @@
+# Application ArgoCD des Business Services.
+#
+# Modele GitOps : ce depot est la SEULE source de verite de l'etat du cluster.
+# Personne ne fait de kubectl apply a la main ; une derive est detectee et corrigee.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: business-services
+  namespace: argocd
+  finalizers:
+    # Supprime les ressources du cluster si l'Application est supprimee,
+    # au lieu de laisser des objets orphelins.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: forterro
+
+  source:
+    repoURL: https://github.com/forterro/business-services.git
+    targetRevision: main
+    path: deploy/k8s/overlays/production
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: business-services
+
+  syncPolicy:
+    automated:
+      # Supprime les ressources retirees du depot : sans ca, un ancien Deployment
+      # continue de tourner indefiniment apres avoir ete supprime du code.
+      prune: true
+      # Corrige toute modification manuelle faite directement sur le cluster.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - PrunePropagationPolicy=foreground
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+
+  # Le HPA pilote le nombre de replicas : sans cette exception, ArgoCD
+  # ramenerait en permanence le Deployment a la valeur ecrite dans Git
+  # et annulerait chaque montee en charge.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+  revisionHistoryLimit: 10
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: forterro
+  namespace: argocd
+spec:
+  description: Business Services mutualises
+  sourceRepos:
+    - https://github.com/forterro/business-services.git
+  destinations:
+    - namespace: business-services
+      server: https://kubernetes.default.svc
+  # Liste blanche stricte : cette application n'a aucune raison de creer
+  # des ClusterRole ou de toucher a des ressources cluster-wide.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

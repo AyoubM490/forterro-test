@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Forterro.Outbox.EntityFrameworkCore</PackageId>
+    <Version>1.0.0</Version>
+    <Description>Pattern Outbox sur Entity Framework Core : ecriture transactionnelle de l'evenement avec le changement d'etat, dispatcher avec bail, purge.</Description>
+    <PackageTags>forterro;outbox;entityframeworkcore;transactional-messaging</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Abstractions SEULEMENT. Ce paquet ne connait aucun transport : il publie via
+         IEventPublisher. Il referencait auparavant Kafka pour des noms d'en-tete,
+         desormais dans MessagingHeaders. -->
+    <ProjectReference Include="..\Forterro.Messaging.Abstractions\Forterro.Messaging.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+</Project>

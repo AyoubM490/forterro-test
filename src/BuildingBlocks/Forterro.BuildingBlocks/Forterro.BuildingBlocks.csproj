@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Ce projet est publie comme paquet NuGet consomme par toutes les lignes produit. -->
+    <IsPackable>true</IsPackable>
+    <PackageId>Forterro.BuildingBlocks</PackageId>
+    <!-- MINEURE : six types partent dans Forterro.Messaging.Abstractions, mais le
+         paquet les reexporte et TypeForwards.cs preserve la compatibilite binaire.
+         Rien ne casse, ni a la compilation ni a l'execution : ce n'est pas une majeure. -->
+    <Version>1.1.0</Version>
+    <Description>Briques transverses des Business Services Forterro : auth OIDC, messaging Kafka, pattern Outbox, resilience, observabilite.</Description>
+    <PackageTags>forterro;microservices;kafka;outbox;oidc;observability</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Les contrats de messagerie vivent desormais dans un paquet sans dependance.
+      BuildingBlocks les REEXPORTE : un consommateur existant qui reference ce seul
+      paquet continue de compiler sans modifier une ligne. C'est ce qui rend le
+      decoupage non cassant.
+    -->
+    <ProjectReference Include="..\Forterro.Messaging.Abstractions\Forterro.Messaging.Abstractions.csproj" />
+    <ProjectReference Include="..\Forterro.Diagnostics\Forterro.Diagnostics.csproj" />
+    <ProjectReference Include="..\Forterro.Banking\Forterro.Banking.csproj" />
+    <ProjectReference Include="..\Forterro.Messaging.Kafka\Forterro.Messaging.Kafka.csproj" />
+    <ProjectReference Include="..\Forterro.Outbox.EntityFrameworkCore\Forterro.Outbox.EntityFrameworkCore.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Forterro.BuildingBlocks.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" />
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+    <PackageReference Include="Confluent.Kafka" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="Serilog.AspNetCore" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+    <PackageReference Include="Serilog.Formatting.Compact" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,187 @@
+# Filebeat — collecte des logs conteneurs et traduction CLEF -> ECS.
+#
+# POURQUOI UN COLLECTEUR PLUTOT QU'UN SINK ELASTICSEARCH DANS L'APPLICATION
+#
+# Serilog sait ecrire directement dans Elasticsearch. C'est ecarte :
+#   - ca couple chaque service au backend de logs, et impose d'y distribuer des
+#     identifiants ;
+#   - les evenements bufferises sont PERDUS quand le process meurt — c'est-a-dire
+#     exactement au moment ou on en a besoin ;
+#   - une lenteur d'Elasticsearch devient une latence applicative.
+# Les services ecrivent du JSON sur stdout, Kubernetes le persiste, Filebeat le lit.
+# Si Elasticsearch tombe, on ne perd rien : les fichiers sont toujours la.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebeat-config
+data:
+  filebeat.yml: |
+    filebeat.inputs:
+      - type: filestream
+        id: business-services
+        # Le nom de fichier est <pod>_<namespace>_<conteneur>-<id>.log : filtrer sur
+        # le namespace se fait donc par le glob, sans avoir besoin d'interroger l'API
+        # Kubernetes. C'est ce qui permet a ce DaemonSet de n'avoir AUCUN droit RBAC.
+        paths:
+          - /var/log/containers/*_business-services_*.log
+        # /var/log/containers ne contient que des liens symboliques vers /var/log/pods.
+        # Sans cette option, Filebeat les ignore et ne lit strictement rien — sans
+        # emettre la moindre erreur.
+        prospector.scanner.symlinks: true
+        parsers:
+          - container:
+              stream: all
+              format: auto
+
+        processors:
+          # Le corps du log est une ligne CLEF (Serilog). target: "" remonte ses
+          # champs a la racine du document.
+          - decode_json_fields:
+              fields: ["message"]
+              target: ""
+              overwrite_keys: true
+              add_error_key: false
+
+          # TOUT ce qui suit est conditionne a la presence de @t.
+          #
+          # Une application .NET n'ecrit pas que du JSON : une exception non geree part
+          # sur stderr en texte brut (« Unhandled exception. StackExchange.Redis... »),
+          # tout comme les bannieres de demarrage. Traiter ces lignes comme du CLEF les
+          # ferait disparaitre — or ce sont precisement les plus utiles en incident.
+          # Sans ce garde-fou, elles arrivent dans Elasticsearch amputees de leur message.
+          - if:
+              has_fields: ['@t']
+            then:
+              - timestamp:
+                  field: '@t'
+                  layouts:
+                    - '2006-01-02T15:04:05Z07:00'
+                    - '2006-01-02T15:04:05.999999999Z07:00'
+              # message contient encore le JSON brut ; on le remplace par le message
+              # rendu porte par @m.
+              - drop_fields:
+                  fields: ['message', '@t']
+                  ignore_missing: true
+              # LE COEUR DU SUJET : Elastic attend les champs ECS trace.id et span.id.
+              # Serilog emet @tr et @sp. Sans ce renommage, les logs arrivent bien dans
+              # Elasticsearch mais aucune correlation par trace n'est possible, et rien
+              # dans l'interface ne signale pourquoi.
+              - rename:
+                  fields:
+                    - from: '@tr'
+                      to: 'trace.id'
+                    - from: '@sp'
+                      to: 'span.id'
+                    - from: '@m'
+                      to: 'message'
+                    - from: '@l'
+                      to: 'log.level'
+                    - from: '@x'
+                      to: 'error.stack_trace'
+                    # Empreinte du template de message : identique pour toutes les
+                    # occurrences d'un meme evenement, quelles que soient ses valeurs.
+                    # C'est la cle pour compter « combien de fois CET evenement ».
+                    - from: '@i'
+                      to: 'event.code'
+                  ignore_missing: true
+                  fail_on_error: false
+              # Serilog OMET @l au niveau Information. Sans ce defaut, la majorite des
+              # lignes n'a pas de niveau et tout filtre par severite les exclut.
+              - if:
+                  not:
+                    has_fields: ['log.level']
+                then:
+                  - add_fields:
+                      target: log
+                      fields:
+                        level: Information
+
+    # DATA STREAM, et non index quotidien.
+    #
+    # Filebeat 8 ecrit dans un data stream par defaut : il cree `forterro-logs` et
+    # laisse Elasticsearch gerer le decoupage temporel et le rollover. Les index
+    # dates a la main (forterro-logs-%{+yyyy.MM.dd}) sont un heritage de la 6.x.
+    #
+    # PIEGE : le motif du template doit matcher le NOM DU DATA STREAM. Avec
+    # `forterro-logs-*` (tiret final), le template ne matche jamais `forterro-logs`
+    # et Filebeat s'arrete sur :
+    #   400 Bad Request: no matching index template found for data stream [forterro-logs]
+    # Les logs n'arrivent alors nulle part, et le seul indice est dans les logs de
+    # Filebeat lui-meme. D'ou `forterro-logs*`, sans tiret.
+    output.elasticsearch:
+      hosts: ["http://elasticsearch.infra.svc.cluster.local:9200"]
+      index: "forterro-logs"
+
+    setup.ilm.enabled: false
+    setup.template:
+      name: "forterro-logs"
+      pattern: "forterro-logs*"
+      overwrite: true
+
+    logging.level: info
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: filebeat
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: filebeat
+    spec:
+      # Aucun ServiceAccount, aucun ClusterRole : le filtrage par namespace se fait
+      # sur le nom de fichier. Le DaemonSet ne parle jamais a l'API Kubernetes, et
+      # l'AppProject ArgoCD conserve sa liste blanche stricte, qui n'autorise aucune
+      # ressource cluster-wide en dehors des Namespace.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: filebeat
+          image: docker.elastic.co/beats/filebeat:8.15.3
+          args: ["-e", "-c", "/etc/filebeat.yml"]
+          securityContext:
+            # Les fichiers de /var/log/pods appartiennent a root et ne sont pas
+            # lisibles autrement.
+            runAsUser: 0
+          volumeMounts:
+            - name: config
+              mountPath: /etc/filebeat.yml
+              subPath: filebeat.yml
+              readOnly: true
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            # Indispensable : /var/log/containers ne contient que des liens vers
+            # /var/log/pods. Monter le premier sans le second donne des symlinks
+            # casses, et Filebeat ne lit rien.
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            # Registre de lecture, sur l'hote : sans lui, un redemarrage de Filebeat
+            # reprend chaque fichier depuis le debut et duplique tout l'historique.
+            - name: data
+              mountPath: /usr/share/filebeat/data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 300Mi
+      volumes:
+        - name: config
+          configMap:
+            name: filebeat-config
+            defaultMode: 0644
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+        - name: data
+          hostPath:
+            path: /var/lib/filebeat-data
+            type: DirectoryOrCreate

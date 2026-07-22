@@ -1,0 +1,173 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invoicing-api
+  labels:
+    app.kubernetes.io/name: invoicing-api
+    app.kubernetes.io/part-of: business-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: invoicing-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Zero downtime : on ajoute un pod avant d'en retirer un.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: invoicing-api
+        app.kubernetes.io/part-of: business-services
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Repartit les replicas sur des noeuds distincts : la perte d'un noeud
+      # ne doit pas emporter tout le service.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: invoicing-api
+      containers:
+        - name: api
+          image: ghcr.io/forterro/invoicing-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: ConnectionStrings__Invoicing
+              valueFrom:
+                secretKeyRef:
+                  name: invoicing-secrets
+                  key: connection-string
+            - name: Kafka__BootstrapServers
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: kafka-bootstrap-servers
+            - name: Kafka__ConsumerGroupId
+              value: invoicing-api
+            - name: Kafka__Topics__0
+              value: forterro.payments.v1
+            - name: Oidc__Authority
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: oidc-authority
+            - name: Oidc__Audience
+              value: forterro-business-services
+            - name: Otlp__Endpoint
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: otlp-endpoint
+          # Le conteneur tourne en lecture seule : .NET a quand meme besoin
+          # d'ecrire (fichiers temporaires, cle de protection des donnees).
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # Pas de limite CPU volontairement : le throttling CFS degrade
+              # fortement les latences .NET pour un benefice discutable.
+              memory: 512Mi
+          startupProbe:
+            # Couvre le demarrage a froid (JIT, connexion a la base, metadonnees OIDC).
+            # Sans elle, une liveness trop stricte tuerait le pod avant qu'il soit pret.
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            # Touche la base : un pod qui ne peut plus lire Postgres sort du service
+            # sans etre redemarre pour autant.
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Laisse le temps a l'Ingress de retirer le pod du pool avant
+              # que le process ne commence son arret : evite les 502 au rollout.
+              exec:
+                command: ["sleep", "5"]
+      terminationGracePeriodSeconds: 45
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: invoicing-api
+  labels:
+    app.kubernetes.io/name: invoicing-api
+spec:
+  selector:
+    app.kubernetes.io/name: invoicing-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: invoicing-api
+spec:
+  # Garantit qu'un drain de noeud ne peut pas supprimer tous les replicas.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: invoicing-api
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: invoicing-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: invoicing-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # Descente lente : evite le battement sur un trafic en dents de scie.
+      stabilizationWindowSeconds: 300

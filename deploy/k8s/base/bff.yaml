@@ -1,0 +1,255 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+  labels:
+    app.kubernetes.io/name: bff
+    app.kubernetes.io/part-of: business-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bff
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bff
+        app.kubernetes.io/part-of: business-services
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: bff
+      containers:
+        - name: bff
+          image: ghcr.io/forterro/bff:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+
+            # Role de client OAuth : obtenir des jetons au nom de l'utilisateur.
+            - name: Bff__Authority
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: oidc-authority
+            - name: Bff__ClientId
+              value: forterro-bff
+            - name: Bff__ClientSecret
+              valueFrom:
+                secretKeyRef:
+                  name: bff-secrets
+                  key: client-secret
+            - name: Bff__AllowedOrigins__0
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: frontend-origin
+            - name: Bff__Scopes__0
+              value: invoicing:read
+            - name: Bff__Scopes__1
+              value: invoicing:write
+            - name: Bff__Scopes__2
+              value: payments:read
+
+            # Role de serveur de ressources : valider les jetons des appels machine.
+            - name: Oidc__Authority
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: oidc-authority
+            - name: Oidc__Audience
+              value: forterro-business-services
+
+            # Sessions partagees entre replicas. Sans Redis, chaque pod ne connait que
+            # ses propres sessions et l'utilisateur est deconnecte a chaque bascule.
+            - name: ConnectionStrings__Redis
+              valueFrom:
+                secretKeyRef:
+                  name: bff-secrets
+                  key: redis-connection-string
+
+            - name: ReverseProxy__Clusters__invoicing__Destinations__primary__Address
+              value: http://invoicing-api/
+            - name: ReverseProxy__Clusters__payments__Destinations__primary__Address
+              value: http://payments-worker/
+            - name: ReverseProxy__Clusters__openbanking__Destinations__primary__Address
+              value: http://openbanking-api/
+            - name: ReverseProxy__Clusters__intelligence__Destinations__primary__Address
+              value: http://intelligence-api.business-services.svc.cluster.local/
+            - name: Downstream__Invoicing__BaseUrl
+              value: http://invoicing-api/
+            - name: Downstream__Payments__BaseUrl
+              value: http://payments-worker/
+
+            - name: Otlp__Endpoint
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: otlp-endpoint
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+      terminationGracePeriodSeconds: 45
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff
+  labels:
+    app.kubernetes.io/name: bff
+spec:
+  selector:
+    app.kubernetes.io/name: bff
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bff
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bff
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: bff
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: bff
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+# Le BFF est le SEUL pod joignable depuis l'exterieur du namespace, et uniquement
+# par le controleur Ingress. Le namespace refuse tout le reste par defaut.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bff-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bff
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Symetrique cote invoicing : le BFF est desormais un appelant legitime, au meme titre
+# que les autres lignes produit. Sans cette regle, la porte d'entree ne peut rien atteindre.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: invoicing-api-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: invoicing-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bff
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Le worker n'expose qu'une lecture d'etat de saga, et seul le BFF en a l'usage.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: payments-worker-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: payments-worker
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bff
+      ports:
+        - protocol: TCP
+          port: 8080

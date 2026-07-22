@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Contrat de messagerie, sans implementation.
+
+    Ce paquet n'a AUCUNE dependance tierce, et c'est sa raison d'etre. Il est
+    consomme par Forterro.Contracts, lui-meme consomme par toute equipe qui ecoute
+    les evenements des Business Services. Avant ce decoupage, ces equipes heritaient
+    de 67 paquets transitifs — Confluent.Kafka, EF Core, JwtBearer, OpenTelemetry —
+    pour desserialiser un DTO.
+
+    REGLE : si une PackageReference devient necessaire ici, c'est que le type n'a
+    rien a y faire. L'implementation va dans Forterro.BuildingBlocks.
+
+    Le namespace reste Forterro.BuildingBlocks.Messaging : une frontiere d'assemblage
+    n'est pas une frontiere de namespace, et c'est le namespace que les consommateurs
+    ont dans leurs `using`. Le deplacer aurait casse 13 fichiers pour un gain nul.
+  -->
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Forterro.Messaging.Abstractions</PackageId>
+    <!-- Premiere publication : ces types existaient en 1.0.0 dans BuildingBlocks,
+         ils arrivent ici sans modification. Meme version, aucune surprise. -->
+    <Version>1.0.0</Version>
+    <Description>Contrats de messagerie des Business Services Forterro : evenement d'integration, publication, consommation, registre. Sans dependance.</Description>
+    <PackageTags>forterro;messaging;integration-events;abstractions</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Forterro.BuildingBlocks.Tests" />
+  </ItemGroup>
+
+</Project>

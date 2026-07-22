@@ -1,0 +1,109 @@
+# Application ArgoCD pour un cluster local (k3d).
+#
+# Volontairement identique a application.yaml sur tout ce qui constitue le modele
+# GitOps — prune, selfHeal, ignoreDifferences, finalizer, AppProject en liste blanche.
+# Seules changent la SOURCE (un depot servi depuis la machine hote au lieu de GitHub)
+# et le CHEMIN (overlay local au lieu de production).
+#
+# Voir deploy/k8s/overlays/local/kustomization.yaml pour ce que l'overlay retire, et
+# pourquoi.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: forterro-local
+  namespace: argocd
+spec:
+  description: Business Services — poste de developpement
+  sourceRepos:
+    - http://host.k3d.internal:3000/forterro/business-services.git
+  destinations:
+    - namespace: business-services
+      server: https://kubernetes.default.svc
+    - namespace: infra
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: business-services
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: forterro-local
+
+  source:
+    # host.k3d.internal est injecte dans CoreDNS par k3d : c'est ainsi qu'un pod
+    # atteint un service qui tourne sur la machine hote.
+    repoURL: http://host.k3d.internal:3000/forterro/business-services.git
+    targetRevision: main
+    path: deploy/k8s/overlays/local
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: business-services
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - PrunePropagationPolicy=foreground
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+  revisionHistoryLimit: 10
+---
+# Infrastructure de developpement, en Application SEPAREE.
+#
+# Pourquoi ne pas la mettre dans le meme overlay : son cycle de vie n'est pas celui
+# des services. On redeploie l'applicatif dix fois par jour ; on ne redeploie pas
+# PostgreSQL dix fois par jour, et un `prune` malencontreux sur l'applicatif ne doit
+# pas pouvoir emporter la base. Les separer rend aussi visible la frontiere reelle :
+# en production, cette Application n'existe pas — l'infra y est managee.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: business-services-infra
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: forterro-local
+
+  source:
+    repoURL: http://host.k3d.internal:3000/forterro/business-services.git
+    targetRevision: main
+    path: deploy/k8s/overlays/local/infra
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: infra
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - PrunePropagationPolicy=foreground
+
+  revisionHistoryLimit: 5

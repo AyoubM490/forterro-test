@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels:
+    # Pas de pod-security restricted ici, volontairement : les images officielles
+    # de PostgreSQL, Kafka et Keycloak ne s'y conforment pas sans reecriture.
+    # C'est precisement pour ne PAS avoir a relacher cette contrainte sur le
+    # namespace applicatif que l'infra est isolee.
+    app.kubernetes.io/part-of: business-services-local

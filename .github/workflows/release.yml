@@ -1,0 +1,141 @@
+name: Release
+
+# Declenche par un tag sementique. Le tag EST la decision de livrer :
+# rien ne part en production sans qu'un humain ait pousse ce tag.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish-packages:
+    name: Publier les paquets NuGet partages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Historique complet : necessaire pour que le SourceLink des symboles
+          # pointe vers le bon commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Extraire la version du tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Un projet a la fois, et non la solution.
+      #
+      # `dotnet pack` n'accepte qu'un seul projet : la liste passee auparavant etait
+      # invalide. Empaqueter la solution marcherait, mais emet un avertissement par
+      # application non publiable — sans code, donc infiltrable par NoWarn.
+      #
+      # Consequence assumee : publier un nouveau paquet impose d'editer ce fichier.
+      # C'est voulu. Mettre une bibliotheque a disposition des autres lignes produit
+      # est une decision, elle merite de passer par une relecture de PR.
+      #
+      # Aucun -p:Version ici, VOLONTAIREMENT. La version vient du <Version> de chaque
+      # projet : un paquet ne bouge que lorsque SON contenu change. Le tag git pilote
+      # le deploiement des images, pas la version des bibliotheques.
+      #
+      # Contrepartie : oublier de monter un <Version> ne publie rien, et
+      # --skip-duplicate rend ce non-evenement silencieux. C'est le prix de
+      # l'independance des versions.
+      - name: Empaqueter
+        run: |
+          for projet in \
+            src/BuildingBlocks/Forterro.Messaging.Abstractions/Forterro.Messaging.Abstractions.csproj \
+            src/BuildingBlocks/Forterro.Diagnostics/Forterro.Diagnostics.csproj \
+            src/BuildingBlocks/Forterro.Banking/Forterro.Banking.csproj \
+            src/BuildingBlocks/Forterro.Messaging.Kafka/Forterro.Messaging.Kafka.csproj \
+            src/BuildingBlocks/Forterro.Outbox.EntityFrameworkCore/Forterro.Outbox.EntityFrameworkCore.csproj \
+            src/BuildingBlocks/Forterro.BuildingBlocks/Forterro.BuildingBlocks.csproj \
+            src/Contracts/Forterro.Contracts/Forterro.Contracts.csproj ; do
+            dotnet pack "$projet" --configuration Release --output ./artifacts
+          done
+
+      # Ces paquets sont consommes par les autres lignes produit du groupe :
+      # c'est le mecanisme concret de mutualisation des Business Services.
+      - name: Publier sur le flux interne
+        run: >
+          dotnet nuget push "./artifacts/*.nupkg"
+          --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          --api-key ${{ secrets.GITHUB_TOKEN }}
+          --skip-duplicate
+
+  promote:
+    name: Promouvoir les images et declencher ArgoCD
+    runs-on: ubuntu-latest
+    needs: publish-packages
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extraire la version du tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # On ne reconstruit PAS les images : on retague celles deja testees par la CI.
+      # Reconstruire, c'est livrer un artefact que personne n'a valide.
+      - name: Retaguer les images validees
+        run: |
+          for service in bff invoicing-api openbanking-api payments-worker; do
+            src="ghcr.io/${{ github.repository_owner }}/${service}:sha-${{ github.sha }}"
+            dst="ghcr.io/${{ github.repository_owner }}/${service}:${{ steps.version.outputs.value }}"
+            docker buildx imagetools create --tag "$dst" "$src"
+          done
+
+      # Les images de migration N'ETAIENT CONSTRUITES NULLE PART. Le Job PreSync
+      # referencait ghcr.io/forterro/invoicing-migrations, qu'aucun Dockerfile ne
+      # produisait et qu'aucun workflow ne publiait : la premiere synchronisation
+      # reelle aurait echoue en ImagePullBackOff, et le hook aurait bloque tout le
+      # deploiement.
+      #
+      # Elles sont construites ici et non dans la CI : ce sont des artefacts de
+      # deploiement, pas de test, et leur contenu (les migrations) est deja verifie
+      # par les tests d'integration sur un vrai PostgreSQL.
+      - name: Construire les images de migration
+        run: |
+          set -e
+          build() {
+            docker build -f deploy/migrations/Dockerfile \
+              --build-arg PROJECT_PATH="$2" \
+              -t "ghcr.io/${{ github.repository_owner }}/$1:${{ steps.version.outputs.value }}" .
+            docker push "ghcr.io/${{ github.repository_owner }}/$1:${{ steps.version.outputs.value }}"
+          }
+          build invoicing-migrations src/Services/Invoicing/Forterro.Invoicing.Api
+          build payments-migrations  src/Services/Payments/Forterro.Payments.Worker
+
+      # GitOps : la CI ne parle pas au cluster. Elle ecrit le tag dans Git,
+      # ArgoCD detecte le changement et deploie. Aucun credential Kubernetes
+      # n'existe dans GitHub Actions.
+      - name: Mettre a jour l'overlay de production
+        run: |
+          cd deploy/k8s/overlays/production
+          sed -i "s/newTag: .*/newTag: ${{ steps.version.outputs.value }}/" kustomization.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kustomization.yaml
+          git commit -m "chore(release): deploie la version ${{ steps.version.outputs.value }}"
+          git push origin HEAD:main

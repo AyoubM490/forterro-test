@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  labels:
+    app.kubernetes.io/name: payments-worker
+    app.kubernetes.io/part-of: business-services
+spec:
+  # Deux replicas : le pattern Outbox et le bail sur les sagas rendent
+  # la concurrence sure. Ce n'est PAS un singleton.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payments-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payments-worker
+        app.kubernetes.io/part-of: business-services
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/forterro/payments-worker:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: ConnectionStrings__Payments
+              valueFrom:
+                secretKeyRef:
+                  name: payments-secrets
+                  key: connection-string
+            - name: ServiceAuth__ClientSecret
+              valueFrom:
+                secretKeyRef:
+                  name: payments-secrets
+                  key: oauth-client-secret
+            - name: ServiceAuth__ClientId
+              value: payments-worker
+            - name: ServiceAuth__TokenEndpoint
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: oidc-token-endpoint
+            # ServiceAuth (jeton SORTANT, client credentials) et Oidc (validation du
+            # jeton ENTRANT sur /sagas) sont deux configurations distinctes. Le worker
+            # expose une lecture d'etat protegee par le scope payments:read : sans ces
+            # deux valeurs, AddForterroAuthentication echoue au demarrage et le pod
+            # part en CrashLoopBackOff.
+            - name: Oidc__Authority
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: oidc-authority
+            - name: Oidc__Audience
+              value: forterro-business-services
+            - name: Kafka__BootstrapServers
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: kafka-bootstrap-servers
+            - name: Kafka__ConsumerGroupId
+              value: payments-worker
+            - name: Kafka__Topics__0
+              value: forterro.invoicing.v1
+            - name: OpenBanking__BaseUrl
+              value: http://openbanking-api.business-services.svc.cluster.local/
+            - name: Otlp__Endpoint
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: otlp-endpoint
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+      # Genereux : laisse le consommateur Kafka finir le message en cours
+      # et commiter son offset avant l'arret. Un SIGKILL premature relivre le message.
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-worker
+spec:
+  selector:
+    app.kubernetes.io/name: payments-worker
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payments-worker

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Forterro.Contracts</PackageId>
+    <!-- MINEURE : les contrats eux-memes n'ont pas bouge d'un octet ; seul le graphe
+         de dependances passe de 67 paquets transitifs a zero. Un consommateur qui
+         s'appuyait sur une dependance obtenue TRANSITIVEMENT devra la declarer -
+         c'est le seul impact, et il est deja une erreur de sa part. -->
+    <Version>1.1.0</Version>
+    <Description>Contrats d'integration (evenements) des Business Services Forterro. Versionne independamment des services.</Description>
+    <PackageTags>forterro;contracts;integration-events</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Abstractions SEULEMENT, jamais Forterro.BuildingBlocks.
+      L'ADR 0004 exige que ce paquet reste un porteur de DTO purs. Referencer
+      BuildingBlocks le faisait dependre de 67 paquets transitifs (Kafka, EF Core,
+      JwtBearer, OpenTelemetry) : la regle etait respectee sur le contenu et violee
+      sur les dependances.
+
+      Si cette reference doit un jour pointer ailleurs, c'est le signe qu'un type
+      metier a fui dans les contrats.
+    -->
+    <ProjectReference Include="..\..\BuildingBlocks\Forterro.Messaging.Abstractions\Forterro.Messaging.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

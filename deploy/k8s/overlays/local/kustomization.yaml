@@ -1,0 +1,187 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Overlay de developpement local (k3d + ArgoCD).
+#
+# Il n'a pas vocation a ressembler a la production : il existe pour que la boucle
+# GitOps soit observable sur un poste, sans cluster manage, sans registre d'images
+# et sans gestionnaire de secrets. Tout ce qu'il retire est retire pour une raison
+# precise, documentee ci-dessous.
+
+namespace: business-services
+
+resources:
+  - ../../base
+
+patches:
+  # --- Ingress + cert-manager -------------------------------------------------
+  # L'Ingress cible la classe nginx et le ClusterIssuer est une CRD cert-manager.
+  # Ni l'un ni l'autre n'existe sur un k3d nu (qui embarque Traefik), et ArgoCD
+  # echouerait a la synchronisation sur une ressource dont le type est inconnu.
+  # En local, l'acces se fait par port-forward.
+  - target:
+      kind: Ingress
+      name: business-services
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: business-services
+  - target:
+      group: cert-manager.io
+      kind: ClusterIssuer
+    patch: |-
+      $patch: delete
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: letsencrypt-production
+
+
+  # --- Dimensionnement --------------------------------------------------------
+  # Un replica par service : deux noeuds k3d n'ont pas la marge de la production,
+  # et le PodDisruptionBudget (minAvailable: 1) reste satisfait.
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: HorizontalPodAutoscaler
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 3
+
+  # --- OIDC en clair ----------------------------------------------------------
+  # Keycloak local est en http. Sans cette surcharge, la recuperation du document
+  # de decouverte exige https et le service refuse de demarrer.
+  - target:
+      kind: Deployment
+      name: bff
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: Oidc__RequireHttpsMetadata
+          value: "false"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: Bff__RequireSecureCookie
+          value: "false"
+  - target:
+      kind: Deployment
+      name: invoicing-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: Oidc__RequireHttpsMetadata
+          value: "false"
+  - target:
+      kind: Deployment
+      name: openbanking-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: Oidc__RequireHttpsMetadata
+          value: "false"
+
+  # --- OIDC en clair sur le worker --------------------------------------------
+  # Les deux services a etat ne migrent PLUS au demarrage : les Jobs PreSync
+  # (base/migration-job.yaml) s'en chargent, avec leurs images efbundle construites
+  # en local et importees dans k3d. Le contournement « ASPNETCORE_ENVIRONMENT=
+  # Development » qui existait ici n'a plus lieu d'etre : les pods tournent donc
+  # en Production, comme en production.
+  - target:
+      kind: Deployment
+      name: payments-worker
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: Oidc__RequireHttpsMetadata
+          value: "false"
+  # --- Banque simulee ---------------------------------------------------------
+  # La base fixe BankApi__UseSimulator=false : en production, on parle a une vraie
+  # banque. En local il n'y en a pas, et c'est le simulateur qui porte les scenarios
+  # reproductibles par IBAN (execute / provision insuffisante / banque indisponible).
+  # Sans ce patch, le connecteur HTTP appelle une URL d'exemple et toutes les sagas
+  # echouent en not_found.
+  #
+  # Patch par FUSION et non par index : la liste env n'a pas d'ordre garanti, et un
+  # /env/1 casserait silencieusement des qu'on insere une variable avant.
+  - target:
+      kind: Deployment
+      name: openbanking-api
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: openbanking-api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: api
+                env:
+                  - name: BankApi__UseSimulator
+                    value: "true"
+
+configMapGenerator:
+  - name: business-services-config
+    behavior: merge
+    literals:
+      - kafka-bootstrap-servers=kafka.infra.svc.cluster.local:9092
+      - oidc-authority=http://keycloak.infra.svc.cluster.local:8080/realms/forterro
+      - oidc-token-endpoint=http://keycloak.infra.svc.cluster.local:8080/realms/forterro/protocol/openid-connect/token
+      - otlp-endpoint=http://jaeger.infra.svc.cluster.local:4317
+      - frontend-origin=http://localhost:5000
+
+# Secrets en clair, ASSUME et strictement local.
+# En production ils viennent d'External Secrets Operator ; les valeurs ci-dessous
+# sont celles du realm de demonstration, deja publiques dans forterro-realm.json.
+secretGenerator:
+  - name: invoicing-secrets
+    literals:
+      - connection-string=Host=postgres.infra.svc.cluster.local;Database=forterro_invoicing;Username=forterro;Password=forterro
+  - name: payments-secrets
+    literals:
+      - connection-string=Host=postgres.infra.svc.cluster.local;Database=forterro_payments;Username=forterro;Password=forterro
+      - oauth-client-secret=payments-worker-secret
+  - name: bff-secrets
+    literals:
+      - client-secret=forterro-bff-secret
+      - redis-connection-string=redis.infra.svc.cluster.local:6379
+  - name: openbanking-secrets
+    literals:
+      - bank-client-id=forterro-psd2
+      - bank-client-secret=simulateur
+
+generatorOptions:
+  # Sans ca, chaque regeneration change le nom du Secret et laisse des orphelins
+  # que le prune d'ArgoCD doit rattraper a chaque synchronisation.
+  disableNameSuffixHash: true
+
+images:
+  - name: ghcr.io/forterro/bff
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/invoicing-api
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/openbanking-api
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/payments-worker
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/intelligence-api
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/invoicing-migrations
+    newTag: 1.0.0
+  - name: ghcr.io/forterro/payments-migrations
+    newTag: 1.0.0

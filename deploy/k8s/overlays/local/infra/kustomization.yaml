@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Infrastructure de developpement : PostgreSQL, Kafka, Keycloak, Redis, Jaeger.
+#
+# Elle vit dans SON PROPRE namespace, et pas dans business-services, pour deux raisons :
+#
+#  1. business-services porte pod-security.kubernetes.io/enforce: restricted. Les images
+#     officielles de PostgreSQL, Kafka et Keycloak n'y seraient pas admises sans les
+#     harnacher de securityContext. Relacher la contrainte du namespace applicatif pour
+#     faire entrer de l'infra reviendrait a affaiblir la barriere qui protege les services.
+#
+#  2. En production cette infra n'existe pas dans le cluster — ce sont des instances
+#     managees. La garder a l'exterieur du namespace applicatif rend cette frontiere
+#     visible plutot qu'implicite.
+#
+# Le default-deny-ingress de business-services ne gene pas : il ne filtre QUE l'entrant,
+# et les services applicatifs sont ici a l'origine des connexions.
+
+namespace: infra
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - kafka.yaml
+  - keycloak.yaml
+  - redis-jaeger.yaml
+  - elasticsearch-kibana.yaml
+  - filebeat.yaml
+
+configMapGenerator:
+  # Copie de deploy/keycloak/forterro-realm.json. Kustomize refuse de lire un fichier
+  # hors de son repertoire racine, et le depot GitOps ne contient que deploy/k8s :
+  # la duplication est le prix a payer pour que l'overlay reste auto-portant.
+  - name: keycloak-realm
+    files:
+      - forterro-realm.json
+
+generatorOptions:
+  disableNameSuffixHash: true

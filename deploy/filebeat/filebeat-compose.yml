@@ -1,0 +1,80 @@
+# Filebeat pour la pile docker-compose (profil `elk`).
+#
+# Meme traduction CLEF -> ECS que le DaemonSet Kubernetes
+# (deploy/k8s/overlays/local/infra/filebeat.yaml), avec deux differences :
+#   - la source est l'autodiscover Docker et non /var/log/containers ;
+#   - le filtrage par namespace n'existe pas ; on filtre sur le nom d'image.
+#
+# Voir ADR 0007 pour le raisonnement complet.
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      templates:
+        # Ne collecte que les services metier. Sans cette condition, Filebeat
+        # ingere aussi Kafka, Keycloak et Elasticsearch lui-meme — ce dernier
+        # produisant des logs a propos des logs qu'il vient d'indexer.
+        - condition:
+            contains:
+              docker.container.image: forterro
+          config:
+            - type: container
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+
+processors:
+  - decode_json_fields:
+      fields: ["message"]
+      target: ""
+      overwrite_keys: true
+      add_error_key: false
+
+  # Conditionne a @t : une exception .NET non geree part sur stderr en texte brut.
+  # La traiter comme du CLEF ferait disparaitre son message.
+  - if:
+      has_fields: ['@t']
+    then:
+      - timestamp:
+          field: '@t'
+          layouts:
+            - '2006-01-02T15:04:05Z07:00'
+            - '2006-01-02T15:04:05.999999999Z07:00'
+      - drop_fields:
+          fields: ['message', '@t']
+          ignore_missing: true
+      # Le renommage qui rend la correlation possible : Elastic attend les noms
+      # ECS trace.id / span.id, Serilog ecrit @tr / @sp.
+      - rename:
+          fields:
+            - { from: '@tr', to: 'trace.id' }
+            - { from: '@sp', to: 'span.id' }
+            - { from: '@m',  to: 'message' }
+            - { from: '@l',  to: 'log.level' }
+            - { from: '@x',  to: 'error.stack_trace' }
+            - { from: '@i',  to: 'event.code' }
+          ignore_missing: true
+          fail_on_error: false
+      # Serilog omet @l au niveau Information.
+      - if:
+          not:
+            has_fields: ['log.level']
+        then:
+          - add_fields:
+              target: log
+              fields:
+                level: Information
+
+# Data stream : Filebeat 8 en cree un par defaut. Le motif du template doit matcher
+# son NOM — « forterro-logs* » sans tiret, sinon Elasticsearch repond
+# « no matching index template found for data stream » et rien n'est indexe.
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "forterro-logs"
+
+setup.ilm.enabled: false
+setup.template:
+  name: "forterro-logs"
+  pattern: "forterro-logs*"
+  overwrite: true
+
+logging.level: info

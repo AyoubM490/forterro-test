@@ -1,0 +1,152 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intelligence-api
+  labels:
+    app.kubernetes.io/name: intelligence-api
+    app.kubernetes.io/part-of: business-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: intelligence-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: intelligence-api
+        app.kubernetes.io/part-of: business-services
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ghcr.io/forterro/intelligence-api:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            # Ollama__Model VIDE = connecteur simule deterministe.
+            # Le service demarre et repond sans GPU ni telechargement ; renseigner
+            # ce champ bascule sur le modele ouvert auto-heberge, sans recompiler.
+            #
+            # Aucun Secret ici : un modele auto-heberge n'a pas de cle d'API. C'est
+            # une consequence directe du choix open source (ADR 0008).
+            - name: Ollama__Model
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: ollama-model
+            - name: Ollama__BaseUrl
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: ollama-base-url
+            - name: Oidc__Authority
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: oidc-authority
+            - name: Oidc__Audience
+              value: forterro-business-services
+            - name: Otlp__Endpoint
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: otlp-endpoint
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+      terminationGracePeriodSeconds: 45
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: intelligence-api
+spec:
+  selector:
+    app.kubernetes.io/name: intelligence-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: intelligence-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: intelligence-api
+---
+# Sans cette regle, le default-deny-ingress du namespace rend le service
+# INJOIGNABLE : il tourne, il est Ready, et aucun appel ne l'atteint. C'est
+# exactement l'etat dans lequel il a ete deploye la premiere fois — verifiable
+# uniquement par port-forward, ce qui contourne les NetworkPolicy.
+#
+# Seul le BFF est autorise. Le futur worker documentaire devra etre ajoute ici
+# explicitement : un service qui parle a un modele n'a aucune raison d'etre
+# joignable par n'importe quel pod du cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: intelligence-api-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: intelligence-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bff
+      ports:
+        - protocol: TCP
+          port: 8080

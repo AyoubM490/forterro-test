@@ -1,0 +1,105 @@
+# Kafka en mode KRaft, un seul noeud (broker + controller dans le meme process).
+#
+# Difference avec le docker-compose : un seul listener client au lieu de deux.
+# En conteneur il fallait distinguer le reseau Docker de la machine hote ; ici tout
+# le trafic vient du cluster, donc l'adresse annoncee est le nom de Service complet.
+#
+# ATTENTION : KAFKA_ADVERTISED_LISTENERS doit contenir le nom EXACT par lequel les
+# clients se connectent. Un broker joignable qui annonce une autre adresse provoque
+# une panne particulierement trompeuse — la connexion initiale reussit, puis toutes
+# les operations echouent sur une adresse que le client ne resout pas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+    spec:
+      # Kubernetes injecte une variable KAFKA_PORT=tcp://... pour le Service nomme
+      # "kafka" (service links historiques facon docker link). L'image Confluent la
+      # lit comme l'ancien parametre `port`, deprecie et incompatible avec KRaft :
+      # le conteneur sort en erreur juste apres « port is deprecated ». On desactive
+      # cette injection. C'est un piege propre a Kubernetes : docker-compose ne genere
+      # pas ces variables, donc le meme broker demarre sans probleme la-bas.
+      enableServiceLinks: false
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.7.1
+          ports:
+            - name: kafka
+              containerPort: 9092
+          env:
+            - name: CLUSTER_ID
+              value: forterro-local-cluster-01
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@localhost:29093
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://kafka.infra.svc.cluster.local:9092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            # Un seul broker : tout facteur de replication superieur a 1 laisserait
+            # les topics internes en echec de creation, sans message explicite.
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+          # Sonde TCP volontairement, et non kafka-broker-api-versions : cet outil
+          # bootstrappe puis se RECONNECTE sur l'adresse annoncee (kafka.infra.svc),
+          # laquelle passe par le Service — qui n'a aucun endpoint pret tant que la
+          # sonde echoue. Cercle vicieux : le broker tourne mais n'est jamais Ready.
+          # Un check TCP sur le port local casse la boucle.
+          readinessProbe:
+            tcpSocket:
+              port: kafka
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 1500Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+spec:
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka

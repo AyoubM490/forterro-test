@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openbanking-api
+  labels:
+    app.kubernetes.io/name: openbanking-api
+    app.kubernetes.io/part-of: business-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbanking-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbanking-api
+        app.kubernetes.io/part-of: business-services
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ghcr.io/forterro/openbanking-api:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: BankApi__UseSimulator
+              value: "false"
+            - name: BankApi__BaseUrl
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: bank-api-base-url
+            - name: BankApi__ClientId
+              valueFrom:
+                secretKeyRef:
+                  name: openbanking-secrets
+                  key: bank-client-id
+            - name: BankApi__ClientSecret
+              valueFrom:
+                secretKeyRef:
+                  name: openbanking-secrets
+                  key: bank-client-secret
+            - name: Oidc__Authority
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: oidc-authority
+            - name: Oidc__Audience
+              value: forterro-business-services
+            - name: Otlp__Endpoint
+              valueFrom:
+                configMapKeyRef:
+                  name: business-services-config
+                  key: otlp-endpoint
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+      terminationGracePeriodSeconds: 45
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbanking-api
+spec:
+  selector:
+    app.kubernetes.io/name: openbanking-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: openbanking-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbanking-api
+---
+# Seul payments-worker a le droit d'appeler ce service : il parle a la banque,
+# il n'a aucune raison d'etre joignable par n'importe quel pod du cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openbanking-api-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: openbanking-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: payments-worker
+      ports:
+        - protocol: TCP
+          port: 8080

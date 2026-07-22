@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Forterro.Diagnostics</PackageId>
+    <Version>1.0.0</Version>
+    <Description>Sources de traces et metriques partagees des Business Services Forterro. Sans dependance.</Description>
+    <PackageTags>forterro;diagnostics;opentelemetry;activitysource</PackageTags>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,72 @@
+<Project>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Qualite : on echoue le build sur un warning. Standard d'equipe, pas une option. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- Bruit analyseur non pertinent pour un service applicatif -->
+    <NoWarn>$(NoWarn);CA1848;CA2007;CA1031;CA1812;CA1002;CA2227;CA1056;CA1054</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    Rien n'est publie par defaut : publier est un acte explicite. Les trois projets
+    de paquet remettent IsPackable a true, et leur valeur gagne car
+    Directory.Build.props est importe AVANT le fichier projet.
+
+    A noter : ce defaut ne supprime PAS l'avertissement « packaging has been
+    disabled » que NuGet emet en empaquetant une solution — c'est justement
+    IsPackable=false qui le declenche. Cet avertissement n'a aucun code, donc aucun
+    NoWarn ne le filtre. La seule facon de l'eviter est d'empaqueter les projets
+    publiables un par un, ce que fait release.yml.
+  -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Metadonnees communes aux paquets NuGet publies -->
+  <PropertyGroup>
+    <Company>Forterro</Company>
+    <Product>Forterro Business Services</Product>
+    <Authors>Forterro Business Services Team</Authors>
+
+    <!--
+      PAS de VersionPrefix commun ici : c'est ce qui faisait avancer les paquets au
+      pas cadence. Chaque projet publiable porte son propre <Version>, et ne bouge
+      que lorsque SON contenu change. L'ADR 0004 fait reposer la surete du partage
+      de contrats sur cette independance.
+    -->
+
+    <RepositoryType>git</RepositoryType>
+    <!--
+      RepositoryUrl explicite. PublishRepositoryUrl seul dependait de SourceLink,
+      qui ne resout rien hors d'un depot git : le nuspec produit contenait
+      « <repository type="git" /> » — sans URL ni commit. Un consommateur ne pouvait
+      pas savoir de quel code venait le paquet.
+    -->
+    <RepositoryUrl>https://github.com/forterro/business-services.git</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/forterro/business-services</PackageProjectUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!--
+      Expression SPDX plutot que PackageLicenseFile : elle est lisible par
+      l'outillage (audit de licences, scanners de conformite), la ou un fichier
+      embarque demande une analyse humaine. Les deux sont mutuellement exclusifs.
+      Le fichier LICENSE reste a la racine du depot pour GitHub.
+    -->
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+</Project>

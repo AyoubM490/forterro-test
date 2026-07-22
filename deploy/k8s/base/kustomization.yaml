@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: business-services
+
+commonLabels:
+  app.kubernetes.io/part-of: business-services
+  app.kubernetes.io/managed-by: argocd
+
+resources:
+  - namespace.yaml
+  - bff.yaml
+  - ingress.yaml
+  - invoicing-api.yaml
+  - openbanking-api.yaml
+  - intelligence-api.yaml
+  - payments-worker.yaml
+  - migration-job.yaml
+
+configMapGenerator:
+  - name: business-services-config
+    literals:
+      - kafka-bootstrap-servers=kafka-bootstrap.kafka.svc.cluster.local:9092
+      - oidc-authority=https://auth.forterro.example/realms/forterro
+      - oidc-token-endpoint=https://auth.forterro.example/realms/forterro/protocol/openid-connect/token
+      - otlp-endpoint=http://otel-collector.observability.svc.cluster.local:4317
+      - bank-api-base-url=https://api.banque-partenaire.example/psd2/
+      # Vide tant qu'aucun modele n'est provisionne : le service sert alors le
+      # simulateur plutot que d'echouer au demarrage.
+      - ollama-model=
+      - ollama-base-url=http://ollama.ai.svc.cluster.local:11434
+      - frontend-origin=https://app.forterro.example
+
+# Les secrets ne sont PAS dans Git. En production ils viennent d'External Secrets
+# Operator (adosse a AWS Secrets Manager) ou de Sealed Secrets.
+# Voir deploy/k8s/base/external-secrets.yaml.
+
+images:
+  - name: ghcr.io/forterro/bff
+    newTag: latest
+  - name: ghcr.io/forterro/invoicing-api
+    newTag: latest
+  - name: ghcr.io/forterro/openbanking-api
+    newTag: latest
+  - name: ghcr.io/forterro/payments-worker
+    newTag: latest
+  - name: ghcr.io/forterro/intelligence-api
+    newTag: latest
+  - name: ghcr.io/forterro/invoicing-migrations
+    newTag: latest
+  - name: ghcr.io/forterro/payments-migrations
+    newTag: latest

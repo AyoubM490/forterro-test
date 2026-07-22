@@ -1,0 +1,325 @@
+# Pile complete de developpement : lance depuis la racine du depot avec
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+# Contient tout ce dont le systeme a besoin pour fonctionner de bout en bout :
+# PostgreSQL, Kafka (mode KRaft, sans ZooKeeper), Keycloak, Jaeger.
+
+name: forterro-business-services
+
+services:
+
+  # --- Infrastructure ---------------------------------------------------
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forterro
+      POSTGRES_PASSWORD: forterro
+      # Une base par service : chaque service est proprietaire de son schema.
+      # Pas de base partagee, c'est la regle qui rend les services reellement independants.
+      POSTGRES_MULTIPLE_DATABASES: forterro_invoicing,forterro_payments
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forterro"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    ports:
+      - "9092:9092"
+    environment:
+      # Mode KRaft : plus de ZooKeeper, un seul conteneur pour le broker.
+      CLUSTER_ID: forterro-local-cluster-01
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:9092
+      # Deux listeners : les services dans le reseau Docker utilisent kafka:29092,
+      # un client sur la machine hote utilise localhost:9092.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      # Adresse frontale, celle que le NAVIGATEUR doit voir. Le BFF ne fabrique pas ses URL
+      # de redirection : il les lit dans le document de decouverte. Sans ce reglage, Keycloak
+      # y annonce l'adresse par laquelle il a ete interroge (http://keycloak:8080), qui
+      # n'existe que dans le reseau Docker : le login renvoie l'utilisateur sur un hote
+      # introuvable, et aucun log serveur ne le dit.
+      KC_HOSTNAME: http://localhost:8080
+      # ... mais les appels back-channel (jetons, cles de signature) restent resolus depuis
+      # l'adresse d'appel. Les services en conteneur continuent donc de joindre keycloak:8080.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      # Le realm declare une liste "clientScopes", ce qui REMPLACE les scopes integres de
+      # Keycloak au lieu de les completer. C'est pourquoi profile, email, roles, basic et
+      # web-origins y sont redeclares explicitement : sans eux, les demander renvoie
+      # "Invalid scopes" et aucun token ne porte preferred_username ni realm_access.roles
+      # — donc KeycloakClaimsFlattener n'a jamais rien a aplatir.
+      - ./keycloak/forterro-realm.json:/opt/keycloak/data/import/forterro-realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\nHost: localhost\\nConnection: close\\n\\n' >&3 && cat <&3 | grep -q 'UP'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # interface web
+      - "4317:4317"     # OTLP gRPC
+
+  # --- Services metier ---------------------------------------------------
+
+  invoicing-api:
+    build:
+      context: ..
+      dockerfile: src/Services/Invoicing/Forterro.Invoicing.Api/Dockerfile
+    ports:
+      - "5001:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Invoicing: "Host=postgres;Port=5432;Database=forterro_invoicing;Username=forterro;Password=forterro"
+      Kafka__BootstrapServers: "kafka:29092"
+      Kafka__ConsumerGroupId: "invoicing-api"
+      Kafka__Topics__0: "forterro.payments.v1"
+      # Authority = URL interne (le service appelle Keycloak via le reseau Docker),
+      # ValidIssuer = URL externe (c'est celle que Keycloak inscrit dans le token).
+      # Les confondre est LA cause classique de "IDX10205: issuer validation failed".
+      Oidc__Authority: "http://keycloak:8080/realms/forterro"
+      Oidc__ValidIssuer: "http://localhost:8080/realms/forterro"
+      Oidc__Audience: "forterro-business-services"
+      Oidc__RequireHttpsMetadata: "false"
+      Otlp__Endpoint: "http://jaeger:4317"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  openbanking-api:
+    build:
+      context: ..
+      dockerfile: src/Services/OpenBanking/Forterro.OpenBanking.Api/Dockerfile
+    ports:
+      - "5002:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      BankApi__UseSimulator: "true"
+      Oidc__Authority: "http://keycloak:8080/realms/forterro"
+      Oidc__ValidIssuer: "http://localhost:8080/realms/forterro"
+      Oidc__Audience: "forterro-business-services"
+      Oidc__RequireHttpsMetadata: "false"
+      Otlp__Endpoint: "http://jaeger:4317"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+  payments-worker:
+    build:
+      context: ..
+      dockerfile: src/Services/Payments/Forterro.Payments.Worker/Dockerfile
+    ports:
+      - "5003:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Payments: "Host=postgres;Port=5432;Database=forterro_payments;Username=forterro;Password=forterro"
+      Kafka__BootstrapServers: "kafka:29092"
+      Kafka__ConsumerGroupId: "payments-worker"
+      Kafka__Topics__0: "forterro.invoicing.v1"
+      OpenBanking__BaseUrl: "http://openbanking-api:8080/"
+      ServiceAuth__TokenEndpoint: "http://keycloak:8080/realms/forterro/protocol/openid-connect/token"
+      ServiceAuth__ClientId: "payments-worker"
+      ServiceAuth__ClientSecret: "payments-worker-secret"
+      ServiceAuth__Scope: "payments:write payments:read"
+      # Le worker expose desormais une API de lecture des sagas : il valide donc aussi
+      # les jetons entrants, en plus d'en obtenir pour ses appels sortants.
+      Oidc__Authority: "http://keycloak:8080/realms/forterro"
+      Oidc__ValidIssuer: "http://localhost:8080/realms/forterro"
+      Oidc__Audience: "forterro-business-services"
+      Oidc__RequireHttpsMetadata: "false"
+      Otlp__Endpoint: "http://jaeger:4317"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      openbanking-api:
+        condition: service_started
+
+  # --- Porte d'entree ----------------------------------------------------
+
+  bff:
+    build:
+      context: ..
+      dockerfile: src/Gateway/Forterro.Bff/Dockerfile
+    ports:
+      - "5000:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+
+      # Role de CLIENT OAuth : le BFF obtient des jetons au nom de l'utilisateur.
+      Bff__Authority: "http://keycloak:8080/realms/forterro"
+      Bff__ClientId: "forterro-bff"
+      Bff__ClientSecret: "forterro-bff-secret"
+      # En local le BFF est en http : un cookie Secure ne serait jamais renvoye.
+      Bff__RequireSecureCookie: "false"
+      Bff__Scopes__0: "invoicing:read"
+      Bff__Scopes__1: "invoicing:write"
+      Bff__Scopes__2: "payments:read"
+
+      # Role de SERVEUR DE RESSOURCES : le BFF valide aussi les jetons des appels machine.
+      Oidc__Authority: "http://keycloak:8080/realms/forterro"
+      Oidc__ValidIssuer: "http://localhost:8080/realms/forterro"
+      Oidc__Audience: "forterro-business-services"
+      Oidc__RequireHttpsMetadata: "false"
+
+      ReverseProxy__Clusters__invoicing__Destinations__primary__Address: "http://invoicing-api:8080/"
+      ReverseProxy__Clusters__payments__Destinations__primary__Address: "http://payments-worker:8080/"
+      ReverseProxy__Clusters__openbanking__Destinations__primary__Address: "http://openbanking-api:8080/"
+      ReverseProxy__Clusters__intelligence__Destinations__primary__Address: "http://intelligence-api:8080/"
+      Downstream__Invoicing__BaseUrl: "http://invoicing-api:8080/"
+      Downstream__Payments__BaseUrl: "http://payments-worker:8080/"
+
+      Otlp__Endpoint: "http://jaeger:4317"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      invoicing-api:
+        condition: service_started
+      openbanking-api:
+        condition: service_started
+      payments-worker:
+        condition: service_started
+      intelligence-api:
+        condition: service_started
+
+  # --- Logs centralises (ELK) --------------------------------------------
+  #
+  # Sous PROFIL : `docker compose up` ne les demarre PAS. Elasticsearch et Kibana
+  # pesent a eux deux plus que les quatre services metier reunis ; les imposer a
+  # tout le monde pour un debogage quotidien qui se fait tres bien avec
+  # `docker compose logs` serait un mauvais echange.
+  #
+  #   docker compose -f deploy/docker-compose.yml --profile elk up
+  #
+  # Voir ADR 0007.
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    profiles: [elk]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      # Xms == Xmx : la JVM ne redimensionne pas son tas a chaud.
+      ES_JAVA_OPTS: "-Xms768m -Xmx768m"
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    profiles: [elk]
+    environment:
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+      NODE_OPTIONS: "--max-old-space-size=512"
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: "forterro-local-kibana-encryption-key-0000000"
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.3
+    profiles: [elk]
+    user: root
+    command: ["-e", "-c", "/usr/share/filebeat/filebeat.yml", "--strict.perms=false"]
+    volumes:
+      - ./filebeat/filebeat-compose.yml:/usr/share/filebeat/filebeat.yml:ro
+      # Le socket sert a resoudre le nom du conteneur ; les journaux eux-memes
+      # sont lus dans /var/lib/docker/containers.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  intelligence-api:
+    build:
+      context: ..
+      dockerfile: src/Services/Intelligence/Forterro.Intelligence.Api/Dockerfile
+    ports:
+      - "5004:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Oidc__Authority: "http://keycloak:8080/realms/forterro"
+      Oidc__ValidIssuer: "http://localhost:8080/realms/forterro"
+      Oidc__Audience: "forterro-business-services"
+      Oidc__RequireHttpsMetadata: "false"
+      Otlp__Endpoint: "http://jaeger:4317"
+
+      # Modele VIDE = simulateur deterministe. Le service demarre, s'authentifie et
+      # repond, sans GPU, sans telechargement et sans cle d'API.
+      # Pour brancher le modele reel : profil `ai` ci-dessous + Ollama__Model renseigne.
+      Ollama__BaseUrl: "http://ollama:11434"
+      Ollama__Model: ""
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+  # Runtime de modeles OUVERTS, sous profil : `docker compose up` ne le demarre PAS.
+  # Un modele de vision pese plusieurs Go et n'a d'interet qu'avec un GPU.
+  #
+  #   docker compose -f deploy/docker-compose.yml --profile ai up
+  #   docker compose -f deploy/docker-compose.yml exec ollama ollama pull qwen2.5vl:7b
+  #
+  # Puis renseigner Ollama__Model ci-dessus. Voir ADR 0008.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [ai]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  postgres-data:
+  ollama-models:
