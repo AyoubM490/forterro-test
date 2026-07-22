@@ -100,7 +100,7 @@ jobs:
       # Reconstruire, c'est livrer un artefact que personne n'a valide.
       - name: Retaguer les images validees
         run: |
-          for service in bff invoicing-api openbanking-api payments-worker; do
+          for service in bff intelligence-api invoicing-api openbanking-api payments-worker; do
             src="ghcr.io/${{ github.repository_owner }}/${service}:sha-${{ github.sha }}"
             dst="ghcr.io/${{ github.repository_owner }}/${service}:${{ steps.version.outputs.value }}"
             docker buildx imagetools create --tag "$dst" "$src"

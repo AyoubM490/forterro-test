@@ -126,6 +126,8 @@ jobs:
         include:
           - service: bff
             dockerfile: src/Gateway/Forterro.Bff/Dockerfile
+          - service: intelligence-api
+            dockerfile: src/Services/Intelligence/Forterro.Intelligence.Api/Dockerfile
           - service: invoicing-api
             dockerfile: src/Services/Invoicing/Forterro.Invoicing.Api/Dockerfile
           - service: openbanking-api

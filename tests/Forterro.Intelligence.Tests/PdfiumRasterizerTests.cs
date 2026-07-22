@@ -1,5 +1,5 @@
-using Forterro.Intelligence.Api.Documents;
 using FluentAssertions;
+using Forterro.Intelligence.Api.Documents;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;

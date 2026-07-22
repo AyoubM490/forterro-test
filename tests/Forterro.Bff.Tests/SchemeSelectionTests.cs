@@ -1,6 +1,6 @@
+using FluentAssertions;
 using Forterro.Bff.Authentication;
 using Forterro.Bff.Endpoints;
-using FluentAssertions;
 using Microsoft.AspNetCore.Http;
 using Xunit;
 

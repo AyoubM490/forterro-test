@@ -29,6 +29,14 @@
     <PackageVersion Include="Yarp.ReverseProxy" Version="2.3.0" />
     <PackageVersion Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="9.0.0" />
     <PackageVersion Include="Microsoft.AspNetCore.DataProtection.StackExchangeRedis" Version="9.0.0" />
+    <!--
+      Transitive, tiree par DataProtection.StackExchangeRedis. La 9.0.0 est exposee a
+      GHSA-37gx-xxp4-5rgx (High) : l'etape « Dependances vulnerables » de la CI sort en 1
+      dessus. Epinglee ici plutot que dans le csproj du BFF parce que
+      CentralPackageTransitivePinningEnabled couvre alors TOUT le depot d'un coup — un
+      autre service qui prendrait cette dependance demain heriterait de la version saine.
+    -->
+    <PackageVersion Include="System.Security.Cryptography.Xml" Version="9.0.18" />
   </ItemGroup>
   <ItemGroup Label="Messaging">
     <PackageVersion Include="Confluent.Kafka" Version="2.6.1" />

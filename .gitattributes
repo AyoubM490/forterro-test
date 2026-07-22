@@ -1,0 +1,26 @@
+# Fins de ligne : LF partout, dans l'index ET dans la copie de travail.
+#
+# Sans ce fichier, un poste Windows avec core.autocrlf=true pose des CRLF a la
+# sortie du checkout. Le build passe, mais `dotnet format --verify-no-changes`
+# — qui applique le end_of_line = lf de .editorconfig — signale des centaines
+# d'erreurs ENDOFLINE et WHITESPACE absentes du runner Ubuntu. Le developpeur
+# Windows voit donc rouge une etape que la CI voit verte, et inversement il ne
+# peut plus se fier a sa verification locale pour anticiper la CI.
+#
+# eol=lf (et pas seulement text=auto) est ce qui aligne la copie de travail :
+# text=auto seul ne normalise que l'index.
+* text=auto eol=lf
+
+# Scripts executes dans un conteneur Linux : un CR final casse le shebang
+# ("bad interpreter: /bin/bash^M"). La regle est deja couverte ci-dessus, elle
+# est repetee ici parce que la panne est silencieuse et couteuse a diagnostiquer.
+*.sh text eol=lf
+Dockerfile text eol=lf
+
+# Binaires : jamais de conversion de fins de ligne, elle corromprait le fichier.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.snk binary
