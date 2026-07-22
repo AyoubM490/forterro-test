@@ -172,7 +172,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       - name: Scan de vulnerabilites de l'image
-        uses: aquasecurity/trivy-action@0.28.0
+        # Les tags de cette action portent un « v » : @0.28.0 n'existe pas, et une
+        # reference d'action irresolvable fait echouer le JOB ENTIER a la preparation,
+        # avant meme le premier step. Le « if » ci-dessous ne protege rien : il est
+        # evalue apres la resolution. Le defaut etait invisible tant que ce job restait
+        # skipped (needs: build-and-test echouait en amont).
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:sha-${{ github.sha }}
           format: table
